@@ -2053,8 +2053,9 @@
       }
 
       const QUOTA_FAMILY_PATTERNS = [
+        { key: 'argon', re: /argon/i },
         { key: 'claude', re: /claude|anthropic|opus|sonnet|haiku/i },
-        { key: 'gemini', re: /gemini|google/i },
+        { key: 'gemini', re: /gemini|google/i, excludeRe: /argon/i },
         { key: 'openai', re: /openai|\bgpt|codex/i }
       ];
 
@@ -2078,7 +2079,7 @@
         const text = [card.modelLabel, model && model.label, model && model.modelId, card.modelEnum]
           .filter(Boolean)
           .join(' ');
-        const hit = text ? QUOTA_FAMILY_PATTERNS.find((p) => p.re.test(text)) : null;
+        const hit = text ? QUOTA_FAMILY_PATTERNS.find((p) => p.re.test(text) && (!p.excludeRe || !p.excludeRe.test(text))) : null;
         return hit ? hit.key : '';
       }
 
@@ -2086,8 +2087,8 @@
         const groups = state.quota ? state.quota.groups.filter((g) => g.maxUsedPct !== null) : [];
         if (groups.length === 0) return null;
         const family = resolveCardQuotaFamily(pinnedCard);
-        const match = family
-          ? groups.find((g) => g.family === family || (Array.isArray(g.families) && g.families.includes(family)))
+        const findGroup = (fam) => groups.find((g) => g.family === fam || (Array.isArray(g.families) && g.families.includes(fam)));
+        const match = family ? findGroup(family) || (family === 'argon' ? findGroup('gemini') : null)
           : null;
         if (match) return { group: match, pct: match.maxUsedPct, matched: true };
         const top = groups.reduce((a, b) => (b.maxUsedPct > a.maxUsedPct ? b : a));

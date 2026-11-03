@@ -2694,8 +2694,9 @@ function parseCascadeModelConfigs(data) {
 }
 
 const QUOTA_FAMILY_RULES = [
+  { key: 'gemini', label: 'Google Gemini', re: /gemini|google/i, excludeRe: /argon/i },
   { key: 'claude', label: 'Anthropic Claude', re: /claude|anthropic|opus|sonnet|haiku/i },
-  { key: 'gemini', label: 'Google Gemini', re: /gemini|google/i },
+  { key: 'argon', label: 'Gemini 4 Argon', re: /argon/i },
   { key: 'openai', label: 'OpenAI', re: /openai|\bgpt|codex/i }
 ];
 
@@ -2706,7 +2707,7 @@ const QUOTA_DURATION_UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 
 function classifyQuotaFamilies(...texts) {
   const joined = texts.filter((t) => typeof t === 'string' && t).join(' ');
   if (!joined) return [];
-  return QUOTA_FAMILY_RULES.filter((r) => r.re.test(joined));
+  return QUOTA_FAMILY_RULES.filter((r) => r.re.test(joined) && (!r.excludeRe || !r.excludeRe.test(joined)));
 }
 
 function classifyQuotaFamily(...texts) {
@@ -2780,15 +2781,20 @@ function finalizeQuotaGroups(groupMap) {
     const idx = QUOTA_FAMILY_RULES.findIndex((r) => r.key === key);
     return idx === -1 ? QUOTA_FAMILY_RULES.length : idx;
   };
-  groups.sort((a, b) => familyRank(a.family) - familyRank(b.family) || a.label.localeCompare(b.label));
+  groups.sort((a, b) => {
+    const aOrder = typeof a.orderIndex === 'number' ? a.orderIndex : 9999;
+    const bOrder = typeof b.orderIndex === 'number' ? b.orderIndex : 9999;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return familyRank(a.family) - familyRank(b.family) || a.label.localeCompare(b.label);
+  });
   return groups;
 }
 
-function addQuotaBucketToGroup(groupMap, familyRules, fallbackLabel, bucket) {
+function addQuotaBucketToGroup(groupMap, familyRules, fallbackLabel, bucket, explicitKey = '') {
   const rules = Array.isArray(familyRules) ? familyRules : (familyRules ? [familyRules] : []);
   const primaryRule = rules[0] || null;
   const families = rules.map((r) => r.key);
-  const key = primaryRule ? primaryRule.key : (fallbackLabel || 'general').toLowerCase();
+  const key = explicitKey || (primaryRule ? primaryRule.key : (fallbackLabel || 'general').toLowerCase());
   let group = groupMap.get(key);
   if (!group) {
     group = {
@@ -2816,7 +2822,8 @@ function parseUserQuotaSummary(res) {
   const groupMap = new Map();
 
   const rawGroups = Array.isArray(root.groups) ? root.groups : [];
-  for (const g of rawGroups) {
+  for (let gi = 0; gi < rawGroups.length; gi++) {
+    const g = rawGroups[gi];
     if (!g || typeof g !== 'object') continue;
     const groupLabel = typeof g.displayName === 'string' ? g.displayName.trim() : '';
     const rawBuckets = Array.isArray(g.buckets) ? g.buckets : [];
@@ -2824,10 +2831,20 @@ function parseUserQuotaSummary(res) {
     let familyRules = classifyQuotaFamilies(groupLabel);
     if (familyRules.length === 0) familyRules = classifyQuotaFamilies(g.description);
     if (familyRules.length === 0) familyRules = classifyQuotaFamilies(...bucketHints);
+    const primaryKey = familyRules[0] ? familyRules[0].key : '';
+    const baseKey = primaryKey || (groupLabel ? groupLabel.toLowerCase().replace(/[^a-z0-9_]+/g, '_') : `group_${gi}`);
+    const existingGroup = groupMap.get(baseKey);
+    const groupKey = (existingGroup && existingGroup.label && groupLabel && existingGroup.label !== groupLabel)
+      ? `${baseKey}_${gi}`
+      : baseKey;
+
     for (const rb of rawBuckets) {
       const bucket = normalizeQuotaBucket(rb);
       if (!bucket) continue;
-      const group = addQuotaBucketToGroup(groupMap, familyRules, groupLabel, bucket);
+      const group = addQuotaBucketToGroup(groupMap, familyRules, groupLabel, bucket, groupKey);
+      if (typeof group.orderIndex !== 'number') {
+        group.orderIndex = gi;
+      }
       if (!group.description && typeof g.description === 'string') {
         group.description = g.description.trim();
       }
