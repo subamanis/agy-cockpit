@@ -33,19 +33,21 @@ When a user asks you to **install** or **update** the `agy-cockpit` plugin on th
 
 ## Core Invariants & Engineering Rules
 
-1. **Zero External Dependencies**:
+1. **HARD RULE: Always Inspect Native Antigravity Tools, Bridge & Language Server RPCs First**:
+   - Before proposing, designing, or implementing any feature or workaround, ALWAYS check what native Antigravity tools, `LanguageServerService` RPC methods (by scanning `language_server` binary symbols and probing live RPC responses), `agentapi` CLI subcommands, `window.sidecar` / `preload.js` bridge methods, and on-disk schemas (`~/.gemini/config/projects/*.json`, `annotations/*.pbtxt`, `transcript.jsonl`) exist and what data they provide. Never guess or build a manual workaround before verifying the native surface.
+2. **Zero External Dependencies**:
    - Keep `server.cjs` and `setup.cjs` in pure Node.js (`node:fs`, `node:path`, `node:os`, `node:http`, `node:child_process`, `node:url`) with zero npm packages.
-2. **Cross-Platform Compatibility (Windows & Linux)**:
+3. **Cross-Platform Compatibility (Windows & Linux)**:
    - Never hardcode Windows drive letters (`C:/...`, `d:/...`), user home paths, or platform-specific path separators.
    - Always resolve `~/.gemini/antigravity` (and fallback candidates `antigravity-ide`, `antigravity-cli`) dynamically via `os.homedir()` and `process.env.ANTIGRAVITY_APP_DATA_DIR`.
    - Normalize `file://` URIs and filesystem paths via `normalizeWorkspacePath()`.
    - Keep `buildAgentHandoffRequest()` language-neutral so the agent writes `<HANDOFF_PROMPT>` in the same language the user uses in the conversation.
-3. **Plugin Packaging & Distribution**:
+4. **Plugin Packaging & Distribution**:
    - Keep `"command": "node"` in the repository's `sidecars/agy-cockpit/sidecar.json`. Never commit a machine-specific Node binary path to git; `setup.cjs` resolves `process.execPath` on the target machine at install time.
    - Install `agy-cockpit` as a plugin under `~/.gemini/config/plugins/agy-cockpit/` (`plugin.json`, `README.md`, and `sidecars/agy-cockpit/`) so Antigravity auto-enables and auto-starts the sidecar by default (standalone sidecars in `~/.gemini/config/sidecars/` default to `SIDECAR_STATUS_STOPPED`).
-4. **Performance Budgets**:
+5. **Performance Budgets**:
    - `server.cjs` `/api/status` refreshes must stay `< 5 ms` on warm cache using byte-offset incremental parsing (`parsedBytes`), `.git/HEAD` `mtimeMs` caching, and `~/.gemini/config/projects/` file `mtimeMs` caching.
-5. **User-Facing Terminology & Compaction Tiers**:
+6. **User-Facing Terminology & Compaction Tiers**:
    - Never expose raw `step_index` numbers in `ui.html`. Display **Compacts** (`CHECKPOINT` count), **Prompts** (`USER_INPUT` count), and **Total Tokens** (`input_tokens + cache_read_tokens + output_tokens`, plus aggregated child subagent tokens).
    - Never hardcode a fixed token limit for the compaction progress bar; always compute `observedCompactCeiling` dynamically as the median of `compactTriggerTokens`.
    - Compaction health tiers: **Fresh** (`0-2` compacts with `0` compacted prompts), **Warm** (`3-5` compacts, or `0-2` compacts once earlier prompts are compacted), **Heavy** (`6-9` compacts), **Polluted** (`10+` compacts).

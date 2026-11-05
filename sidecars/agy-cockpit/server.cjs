@@ -5900,6 +5900,20 @@ class AgyCockpitServer {
           });
         }
       }
+      for (const proj of this.projectsRegistry.values()) {
+        if (proj.archived || proj.isWorkspaceOnly || !proj.primaryPath) continue;
+        const projKey = proj.primaryKey || proj.id;
+        if (projKey && !workspaceMap.has(projKey)) {
+          workspaceMap.set(projKey, {
+            key: projKey,
+            projectId: proj.id,
+            path: proj.primaryPath,
+            name: proj.name,
+            count: 0,
+            lastActiveMs: Math.floor(this.projectFileMtimes.get(proj.id) || 0)
+          });
+        }
+      }
       workspaces = [...workspaceMap.values()].sort((a, b) => {
         if (a.key === '__unscoped__') return 1;
         if (b.key === '__unscoped__') return -1;

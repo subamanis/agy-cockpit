@@ -1878,6 +1878,8 @@
         newChatSending: false,
         prevThinkingById: new Map(),
         prevModelRespMsById: new Map(),
+        prevUserInputMsById: new Map(),
+        hasSeededUserInputMs: false,
         traceEnabled: false
       };
 
@@ -3488,7 +3490,7 @@
 
       function renderWorkspacePills(effectiveScope, pinnedId) {
         const allMain = state.conversations.filter((c) => !c.isSubagent);
-        const otherMain = allMain.filter((c) => c.id !== pinnedId);
+        let totalMainCount = 0;
         const countsByWs = new Map();
         const unreadByWs = new Map();
         const thinkingByWs = new Map();
@@ -3500,7 +3502,8 @@
           if (c.waitState === 'permission') waitPermByWs.set(k, true);
           else if (c.waitState === 'question') waitQuestionByWs.set(k, true);
           else if (c.isThinking) thinkingByWs.set(k, true);
-          if (c.id !== pinnedId) {
+          if (c.promptCount > 0 || c.lastActiveMs > 0) {
+            totalMainCount += 1;
             countsByWs.set(k, (countsByWs.get(k) || 0) + 1);
           }
           if (c.unread && !(c.id === pinnedId && effectiveScope === k && isActiveIframe)) {
@@ -3510,13 +3513,15 @@
 
         let html = '';
         for (const ws of state.workspaces) {
-          const otherCount = countsByWs.get(ws.key) || 0;
+          const totalCount = countsByWs.get(ws.key) || 0;
+          const isRegisteredProject = Boolean(ws.projectId && ws.path);
           const hasWaitPerm = Boolean(waitPermByWs.get(ws.key));
           const hasWaitQuestion = Boolean(waitQuestionByWs.get(ws.key));
           const hasUnread = Boolean(unreadByWs.get(ws.key));
           const hasThinking = Boolean(thinkingByWs.get(ws.key));
           if (
-            otherCount === 0 &&
+            !isRegisteredProject &&
+            totalCount === 0 &&
             !hasWaitPerm &&
             !hasWaitQuestion &&
             !hasThinking &&
@@ -3548,13 +3553,13 @@
           html +=
             '<button class="scope-tab ' + (isActive ? 'active' : '') + '" data-ws="' + escapeHtml(ws.key) + '" data-ws-name="' + escapeHtml(ws.name) + '"' + projAttrs + ' title="' + escapeHtml(tip) + '">' +
               indicatorHtml +
-              '<span>' + escapeHtml(ws.name) + ' (' + otherCount + ')</span>' +
+              '<span>' + escapeHtml(ws.name) + ' (' + totalCount + ')</span>' +
             '</button>';
         }
 
         html +=
           '<button class="scope-tab ' + (effectiveScope === '__all__' ? 'active' : '') + '" data-ws="__all__">' +
-            '<span>All (' + otherMain.length + ')</span>' +
+            '<span>All (' + totalMainCount + ')</span>' +
           '</button>';
 
         const archivedProjCount = Array.isArray(state.archivedProjects) ? state.archivedProjects.length : 0;
@@ -3710,6 +3715,17 @@
         }
         state.lastPinnedId = pinnedId;
 
+        if (pinnedCard) {
+          const prevUserMs = state.prevUserInputMsById.get(pinnedCard.id);
+          const curUserMs = Number(pinnedCard.lastUserInputMs) || 0;
+          const isNewUserPrompt = prevUserMs !== undefined
+            ? curUserMs > prevUserMs
+            : (state.hasSeededUserInputMs && curUserMs > 0);
+          if (isNewUserPrompt && state.selectedWorkspaceKey !== '__auto__') {
+            state.selectedWorkspaceKey = '__auto__';
+          }
+        }
+
         const effectiveScope = resolveEffectiveWorkspaceScope(pinnedCard);
         maybeTakeOverActiveClaim();
         if (pinnedCard) {
@@ -3728,12 +3744,16 @@
         }
         const nextThinkingById = new Map();
         const nextModelRespMsById = new Map();
+        const nextUserInputMsById = new Map();
         for (const c of mainChats) {
           nextThinkingById.set(c.id, Boolean(c.isThinking || c.waitState));
           nextModelRespMsById.set(c.id, Number(c.lastModelResponseMs) || 0);
+          nextUserInputMsById.set(c.id, Number(c.lastUserInputMs) || 0);
         }
         state.prevThinkingById = nextThinkingById;
         state.prevModelRespMsById = nextModelRespMsById;
+        state.prevUserInputMsById = nextUserInputMsById;
+        state.hasSeededUserInputMs = true;
 
         if (pinnedCard) {
           let activeCardEl = pinnedContainer.querySelector('.active-card');
@@ -3801,8 +3821,15 @@
 
         const showWsName = effectiveScope === '__all__';
         if (filtered.length === 0) {
+          const hasAnyInScope =
+            effectiveScope === '__all__' ||
+            mainChats.some(
+              (c) => (c.promptCount > 0 || c.lastActiveMs > 0) && (c.workspaceKey || '__unscoped__') === effectiveScope
+            );
           const emptyMsg = effectiveScope !== '__all__'
-            ? 'No other conversations in this workspace. Select "All" to browse other projects.'
+            ? (hasAnyInScope
+                ? 'No other conversations in this workspace. Select "All" to browse other projects.'
+                : 'No conversations in this project yet. Click "+ New" to start one.')
             : 'No other conversations match the current filter.';
           const emptyHtml = '<div class="empty-box">' + emptyMsg + '</div>';
           if (cardsContainer.innerHTML !== emptyHtml) {
