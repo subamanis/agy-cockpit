@@ -118,6 +118,15 @@ function restartRunningSidecarServer() {
   }
 }
 
+function resolveRepoCommitSha(repoDir) {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : '';
+  } catch {
+    return '';
+  }
+}
+
 function installAll() {
   const nodeBin = resolveNodeExecutable();
 
@@ -142,6 +151,12 @@ function installAll() {
     const dest = path.join(SIDECAR_DEST_DIR, filename);
     fs.copyFileSync(src, dest);
   }
+
+  fs.writeFileSync(
+    path.join(PLUGIN_DEST_DIR, 'install_meta.json'),
+    JSON.stringify({ installedCommit: resolveRepoCommitSha(REPO_ROOT), repoRoot: REPO_ROOT.replace(/\\/g, '/'), installedAtMs: Date.now() }, null, 2) + '\n',
+    'utf-8'
+  );
 
   restartRunningSidecarServer();
 

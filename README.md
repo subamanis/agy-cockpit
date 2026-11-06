@@ -147,7 +147,8 @@ node setup.cjs --doctor
 
 ### Updating When New Commits Are Pushed
 
-Because Antigravity runs the plugin from `~/.gemini/config/plugins/agy-cockpit/`, pulling new commits in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server (no Antigravity restart is required on updates; `server.cjs` restarts automatically and `ui.html` hot-reloads on the next poll):
+- **In-Panel One-Click Update (`Update` button)**: AGY Cockpit checks GitHub (`subamanis/agy-cockpit`, branch `main`) in the background on startup and every hour. When a newer commit is available, an amber indicator dot appears next to the top-right **Update** button. Clicking **Update** pulls/downloads the latest release, validates `server.cjs`, updates `~/.gemini/config/plugins/agy-cockpit/`, and hot-reloads the server and panel automatically (or confirms `Already on latest version` when up to date).
+- **Manual CLI Update**: Because Antigravity runs the plugin from `~/.gemini/config/plugins/agy-cockpit/`, pulling new commits manually in the git repository requires re-running `node setup.cjs` to sync the updated files and auto-restart the sidecar server (no Antigravity restart is required on updates; `server.cjs` restarts automatically and `ui.html` hot-reloads on the next poll):
 
 ```bash
 git pull

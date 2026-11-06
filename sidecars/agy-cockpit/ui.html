@@ -126,6 +126,18 @@
       flex-shrink: 0;
     }
 
+    .update-btn { display: inline-flex; align-items: center; gap: 5px; }
+    .update-btn.has-update { color: var(--foreground, #ededed); }
+    .update-btn:disabled { opacity: 0.55; cursor: default; }
+    .update-dot {
+      width: 6.5px;
+      height: 6.5px;
+      border-radius: 50%;
+      background: #f59e0b;
+      box-shadow: 0 0 6px rgba(245, 158, 11, 0.55);
+      flex-shrink: 0;
+    }
+
     .quota-pill {
       display: inline-flex;
       align-items: center;
@@ -1755,7 +1767,10 @@
         </div>
         <div class="topbar-actions">
           <button class="quota-pill" id="quota-pill" data-action="open-quota-modal" style="display:none;"></button>
-          <button class="ghost-btn" id="btn-refresh" title="Refresh">Refresh</button>
+          <button class="ghost-btn update-btn" id="btn-update" title="Check for AGY Cockpit updates on GitHub">
+            <span class="update-dot" id="update-dot" style="display:none;"></span>
+            <span id="btn-update-label">Update</span>
+          </button>
         </div>
       </div>
 
@@ -1863,6 +1878,8 @@
         diagExpanded: false,
         diagRechecking: false,
         dismissedDiagSig: initialDismissedDiagSig,
+        pluginUpdate: null,
+        pluginUpdating: false,
         expandedDetails: new Map(),
         expandedSubagents: new Set(),
         expandedPromptKeys: new Set(),
@@ -1897,7 +1914,9 @@
       const listHeaderCount = document.getElementById('list-header-count');
       const sectionOtherEl = document.getElementById('section-other');
       const statusDotEl = document.getElementById('status-dot');
-      const btnRefresh = document.getElementById('btn-refresh');
+      const btnUpdate = document.getElementById('btn-update');
+      const updateDotEl = document.getElementById('update-dot');
+      const btnUpdateLabelEl = document.getElementById('btn-update-label');
       const quotaPillEl = document.getElementById('quota-pill');
       const modalBackdropEl = document.getElementById('modal-backdrop');
       const toastEl = document.getElementById('toast');
@@ -3780,6 +3799,7 @@
         renderWorkspacePills(effectiveScope, pinnedId);
         uiTraceSnapshot(effectiveScope);
         renderDiagnosticsSticky();
+        renderPluginUpdateButton();
         renderQuotaPill(pinnedCard);
         refreshQuotaModal();
         refreshContextBreakdownModalOnPoll();
@@ -3880,6 +3900,25 @@
             }
             syncCardDom(rowEl, c, renderCompactRowHeader(c, showWsName));
           }
+        }
+      }
+
+      function renderPluginUpdateButton() {
+        if (!btnUpdate) return;
+        const pu = state.pluginUpdate;
+        const hasUpdate = Boolean(pu && pu.updateAvailable);
+        if (updateDotEl) updateDotEl.style.display = hasUpdate ? 'inline-block' : 'none';
+        btnUpdate.classList.toggle('has-update', hasUpdate);
+        btnUpdate.disabled = Boolean(state.pluginUpdating);
+        if (btnUpdateLabelEl) btnUpdateLabelEl.textContent = state.pluginUpdating ? 'Updating...' : 'Update';
+        if (state.pluginUpdating) {
+          btnUpdate.title = 'Checking and applying AGY Cockpit update...';
+        } else if (hasUpdate) {
+          btnUpdate.title = 'Update available on GitHub (' + (pu?.installedShort || 'installed') + ' -> ' + (pu?.remoteShort || 'latest') + '). Click to update and reload.';
+        } else if (pu && pu.installedShort) {
+          btnUpdate.title = 'AGY Cockpit (' + pu.installedShort + '). Click to check GitHub for updates.';
+        } else {
+          btnUpdate.title = 'Check for AGY Cockpit updates on GitHub';
         }
       }
 
@@ -4033,7 +4072,7 @@
       }
 
       async function fetchStatus(force = false) {
-        if (!force && state.pollInFlight) return;
+        if (!force && (state.pollInFlight || state.pluginUpdating)) return;
         state.pollInFlight = true;
         let pollOk = false;
         try {
@@ -4105,6 +4144,9 @@
             : null;
           if (data.diagnostics) {
             state.diagnostics = data.diagnostics;
+          }
+          if (data.pluginUpdate) {
+            state.pluginUpdate = data.pluginUpdate;
           }
           state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
 
@@ -5434,22 +5476,49 @@
         return true;
       }
 
-      btnRefresh.addEventListener('click', async () => {
-        state.selectedWorkspaceKey = '__auto__';
-        state.manualPinId = '';
-        state.manualPinTs = 0;
-        if (window.sidecar && typeof window.sidecar.getWorkspaceUris === 'function') {
-          try {
-            const uris = await window.sidecar.getWorkspaceUris();
-            if (Array.isArray(uris) && uris.length > 0) {
-              updateWorkspaceUris(uris);
+      btnUpdate.addEventListener('click', async () => {
+        if (state.pluginUpdating) return;
+        state.pluginUpdating = true;
+        renderPluginUpdateButton();
+        let reloading = false;
+        try {
+          const res = await apiFetch('/api/plugin-update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+          });
+          const data = await res.json().catch(() => ({}));
+          if (data && data.pluginUpdate) state.pluginUpdate = data.pluginUpdate;
+          if (res.ok && data && data.updated) {
+            reloading = true;
+            showToast('Updated to ' + (data.installedShort || 'latest') + ', reloading...');
+            for (let attempt = 0; attempt < 20; attempt++) {
+              await new Promise((r) => setTimeout(r, 250));
+              try {
+                const probe = await apiFetch('/api/status');
+                if (probe.ok) break;
+              } catch {}
             }
-          } catch {}
+            window.location.reload();
+            return;
+          }
+          await fetchStatus(true);
+          if (res.ok && data && data.upToDate) {
+            const verSuffix = data.installedShort ? ' (' + data.installedShort + ')' : '';
+            showToast('Already on latest version' + verSuffix);
+          } else if (res.ok && data && data.blockedByDirty) {
+            showToast('Update ' + (data.remoteShort || '') + ' skipped (uncommitted changes in local repo)');
+          } else {
+            showToast('Update check failed: ' + ((data && data.error) || ('HTTP ' + res.status)));
+          }
+        } catch (err) {
+          showToast('Update check failed: ' + (err && err.message ? err.message : 'network error'));
+        } finally {
+          if (!reloading) {
+            state.pluginUpdating = false;
+            renderPluginUpdateButton();
+          }
         }
-        await fetchStatus(true);
-        await ensureModelsLoaded(state.hostConvId, true);
-        await refreshOpenDetailsDrawers();
-        showToast('Refreshed');
       });
 
       // Unread / "is the user looking at this chat" model. Every fact below was verified with a live

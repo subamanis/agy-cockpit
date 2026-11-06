@@ -10,6 +10,9 @@ const { fileURLToPath, pathToFileURL } = require('node:url');
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8091;
 const SIDECAR_NAME = 'agy-cockpit';
+const GITHUB_REPO = 'subamanis/agy-cockpit';
+const GITHUB_BRANCH = 'main';
+const PLUGIN_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const APP_CANDIDATES = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SENDER_UUID_RE = /\bsender=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![/a-z0-9_-])/i;
@@ -206,13 +209,12 @@ function resolveDataDir(appDataDir) {
   }
 }
 
-function writeJsonAtomic(filePath, data, mode, pretty = false) {
+function writeFileAtomic(filePath, content, mode) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const suffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
   const tmpPath = `${filePath}.tmp.${suffix}`;
-  const raw = pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
   try {
-    fs.writeFileSync(tmpPath, raw, { encoding: 'utf-8', mode });
+    fs.writeFileSync(tmpPath, Buffer.isBuffer(content) ? content : String(content), Buffer.isBuffer(content) ? (mode ? { mode } : undefined) : { encoding: 'utf-8', mode });
     fs.renameSync(tmpPath, filePath);
   } catch (err) {
     try {
@@ -220,6 +222,10 @@ function writeJsonAtomic(filePath, data, mode, pretty = false) {
     } catch {}
     throw err;
   }
+}
+
+function writeJsonAtomic(filePath, data, mode, pretty = false) {
+  writeFileAtomic(filePath, pretty ? JSON.stringify(data, null, 2) + '\n' : JSON.stringify(data), mode);
 }
 
 function normalizeWorkspacePath(rawInput) {
@@ -2957,6 +2963,14 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function execFileAsync(file, args, options = {}, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    execFile(file, args, { encoding: 'utf-8', timeout: timeoutMs, windowsHide: true, ...options }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: String(stdout || ''), stderr: String(stderr || ''), error: err ? err.message : '' });
+    });
+  });
+}
+
 class AgyCockpitServer {
   constructor(options = {}) {
     this.appDataDir = options.appDataDir || resolveAppDataDir();
@@ -3029,6 +3043,15 @@ class AgyCockpitServer {
     this.lastBinaryStatCheckMs = 0;
     this.lastKnownBinarySig = '';
     this.lastKnownSymbolsKey = '';
+
+    this.pluginUpdateState = { updateAvailable: false, installedCommit: '', remoteCommit: '', checkedAtMs: 0, localDirty: false, isAhead: false, error: '' };
+    this.pluginUpdateCheckPromise = null;
+    this.pluginUpdateApplyPromise = null;
+    this.pluginUpdateTimer = null;
+    this.pluginUpdateRev = 1;
+    this.lastPluginUpdateSig = '';
+    this.cachedInstallMeta = null;
+    this.restartingForUpdate = false;
 
     this.indexCachePath = path.join(this.dataDir, 'index_cache.json');
     this.metadataCachePath = path.join(this.dataDir, 'metadata_cache.json');
@@ -4849,6 +4872,227 @@ class AgyCockpitServer {
     } catch {}
   }
 
+  readPluginInstallMeta(force = false) {
+    if (!force && this.cachedInstallMeta) return this.cachedInstallMeta;
+    const parentDir = path.resolve(__dirname, '..', '..');
+    const defaultDir = path.join(path.dirname(this.projectsDir), 'plugins', 'agy-cockpit');
+    const pluginDir = isFile(path.join(parentDir, 'plugin.json')) && !isDirectory(path.join(parentDir, '.git'))
+      ? parentDir
+      : defaultDir;
+    const metaPath = path.join(pluginDir, 'install_meta.json');
+    let installedCommit = '';
+    let repoRoot = '';
+    if (isFile(metaPath)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        if (typeof raw?.installedCommit === 'string' && /^[0-9a-f]{40}$/i.test(raw.installedCommit.trim())) {
+          installedCommit = raw.installedCommit.trim().toLowerCase();
+        }
+        if (typeof raw?.repoRoot === 'string' && raw.repoRoot.trim()) {
+          repoRoot = normalizeWorkspacePath(raw.repoRoot.trim());
+        }
+      } catch {}
+    }
+    if (!repoRoot && isDirectory(path.join(parentDir, '.git'))) {
+      repoRoot = normalizeWorkspacePath(parentDir);
+    }
+    this.cachedInstallMeta = { pluginDir, metaPath, installedCommit, repoRoot };
+    return this.cachedInstallMeta;
+  }
+
+  getPluginUpdatePayload() {
+    const st = this.pluginUpdateState;
+    const installedCommit = st.installedCommit || this.readPluginInstallMeta(false).installedCommit || '';
+    const remoteCommit = st.remoteCommit || '';
+    return {
+      updateAvailable: Boolean(st.updateAvailable),
+      installedCommit,
+      installedShort: installedCommit.slice(0, 7),
+      remoteCommit,
+      remoteShort: remoteCommit.slice(0, 7),
+      checkedAtMs: st.checkedAtMs || 0,
+      localDirty: Boolean(st.localDirty),
+      isAhead: Boolean(st.isAhead)
+    };
+  }
+
+  async fetchRemoteMainCommit() {
+    let apiErr = '';
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/commits/${GITHUB_BRANCH}`, {
+        headers: { 'User-Agent': 'agy-cockpit', Accept: 'application/vnd.github.v3+json' },
+        signal: AbortSignal.timeout(6000)
+      });
+      if (res.ok) {
+        const parsed = await res.json();
+        if (typeof parsed?.sha === 'string' && /^[0-9a-f]{40}$/i.test(parsed.sha.trim())) {
+          return { sha: parsed.sha.trim().toLowerCase(), error: '' };
+        }
+      } else {
+        apiErr = `GitHub HTTP ${res.status}`;
+      }
+    } catch (err) {
+      apiErr = err?.message || '';
+    }
+    const ls = await execFileAsync('git', ['ls-remote', `https://github.com/${GITHUB_REPO}.git`, `refs/heads/${GITHUB_BRANCH}`], {}, 6000);
+    const m = ls.ok && /^([0-9a-f]{40})\b/i.exec((ls.stdout || '').trim());
+    return m ? { sha: m[1].toLowerCase(), error: '' } : { sha: '', error: apiErr || ls.error || 'Could not reach GitHub' };
+  }
+
+  async checkPluginUpdate(force = false) {
+    const now = Date.now();
+    if (!force && this.pluginUpdateState.checkedAtMs > 0 && now - this.pluginUpdateState.checkedAtMs < PLUGIN_UPDATE_CHECK_INTERVAL_MS) {
+      return this.pluginUpdateState;
+    }
+    if (this.pluginUpdateCheckPromise) return this.pluginUpdateCheckPromise;
+
+    const runPromise = (async () => {
+      let { installedCommit, repoRoot } = this.readPluginInstallMeta(true);
+      const remoteRes = await this.fetchRemoteMainCommit();
+      const remoteCommit = remoteRes.sha;
+      if (!remoteCommit) {
+        this.pluginUpdateState = {
+          ...this.pluginUpdateState,
+          installedCommit: installedCommit || this.pluginUpdateState.installedCommit || '',
+          checkedAtMs: Date.now(),
+          error: remoteRes.error || 'Could not reach GitHub'
+        };
+        return this.pluginUpdateState;
+      }
+
+      let localDirty = false;
+      let isAhead = false;
+      if (repoRoot && isDirectory(path.join(repoRoot, '.git'))) {
+        if (!installedCommit) {
+          const headRes = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot }, 3000);
+          const sha = (headRes.stdout || '').trim().toLowerCase();
+          if (headRes.ok && /^[0-9a-f]{40}$/.test(sha)) installedCommit = sha;
+        }
+        const statusRes = await execFileAsync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: repoRoot }, 3000);
+        localDirty = Boolean(statusRes.ok && statusRes.stdout.trim().length > 0);
+        if (installedCommit && remoteCommit !== installedCommit) {
+          const ancRes = await execFileAsync('git', ['merge-base', '--is-ancestor', remoteCommit, installedCommit], { cwd: repoRoot }, 3000);
+          isAhead = Boolean(ancRes.ok);
+        }
+      }
+
+      const updateAvailable = Boolean(!localDirty && (!installedCommit || (remoteCommit !== installedCommit && !isAhead)));
+      const nextState = { updateAvailable, installedCommit: installedCommit || '', remoteCommit, checkedAtMs: Date.now(), localDirty, isAhead, error: '' };
+      this.pluginUpdateState = nextState;
+
+      const nextSig = `${nextState.updateAvailable}|${nextState.installedCommit}|${nextState.remoteCommit}|${nextState.localDirty}|${nextState.isAhead}`;
+      if (nextSig !== this.lastPluginUpdateSig) {
+        this.lastPluginUpdateSig = nextSig;
+        this.pluginUpdateRev += 1;
+        this.cachedCardsState = null;
+      }
+      return nextState;
+    })();
+
+    this.pluginUpdateCheckPromise = runPromise;
+    try {
+      return await runPromise;
+    } finally {
+      this.pluginUpdateCheckPromise = null;
+    }
+  }
+
+  async applyPluginUpdate() {
+    if (this.pluginUpdateApplyPromise) return this.pluginUpdateApplyPromise;
+    const failUpdate = (status, error) => ({ status, body: { ok: false, updated: false, error, pluginUpdate: this.getPluginUpdatePayload() } });
+
+    const runPromise = (async () => {
+      const st = await this.checkPluginUpdate(true);
+      if (st.error || !st.remoteCommit) return failUpdate(502, st.error || 'Could not reach GitHub to check for updates');
+      if (!st.updateAvailable) {
+        const blockedByDirty = Boolean(st.localDirty && st.remoteCommit && (!st.installedCommit || (st.remoteCommit !== st.installedCommit && !st.isAhead)));
+        const pluginUpdate = this.getPluginUpdatePayload();
+        return { status: 200, body: { ok: true, updated: false, upToDate: !blockedByDirty, blockedByDirty, ...pluginUpdate, pluginUpdate } };
+      }
+
+      const { pluginDir, metaPath, repoRoot } = this.readPluginInstallMeta(false);
+      const sidecarDir = path.join(pluginDir, 'sidecars', 'agy-cockpit');
+      const targetCommit = st.remoteCommit;
+      const relFiles = ['plugin.json', 'README.md', 'sidecars/agy-cockpit/sidecar.json', 'sidecars/agy-cockpit/server.cjs', 'sidecars/agy-cockpit/ui.html'];
+      const fileBuffers = new Map();
+
+      if (repoRoot && isDirectory(path.join(repoRoot, '.git'))) {
+        const pullRes = await execFileAsync('git', ['pull', '--ff-only'], { cwd: repoRoot }, 12000);
+        const headRes = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot }, 3000);
+        if (!pullRes.ok || !headRes.ok || headRes.stdout.trim().toLowerCase() !== targetCommit) {
+          return failUpdate(502, `Local git pull --ff-only did not reach ${targetCommit.slice(0, 7)}: ${(pullRes.stderr || pullRes.error || 'branch diverged').trim()}`);
+        }
+        try {
+          for (const rel of relFiles) {
+            fileBuffers.set(rel, fs.readFileSync(path.join(repoRoot, ...rel.split('/'))));
+          }
+        } catch (err) {
+          return failUpdate(500, `Failed to read updated files from local repo: ${err.message}`);
+        }
+      } else {
+        try {
+          await Promise.all(relFiles.map(async (rel) => {
+            const res = await fetch(`https://raw.githubusercontent.com/${GITHUB_REPO}/${targetCommit}/${rel}`, {
+              headers: { 'User-Agent': 'agy-cockpit' },
+              signal: AbortSignal.timeout(10000)
+            });
+            if (!res.ok) throw new Error(`${rel} (HTTP ${res.status})`);
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length === 0) throw new Error(`${rel} (empty response)`);
+            fileBuffers.set(rel, buf);
+          }));
+        } catch (err) {
+          return failUpdate(502, `Failed to download update from GitHub: ${err.message}`);
+        }
+      }
+
+      let parsedSidecarManifest;
+      try {
+        const parsedPlugin = JSON.parse(fileBuffers.get('plugin.json').toString('utf-8'));
+        parsedSidecarManifest = JSON.parse(fileBuffers.get('sidecars/agy-cockpit/sidecar.json').toString('utf-8'));
+        if (!parsedPlugin || typeof parsedPlugin !== 'object' || !parsedSidecarManifest || typeof parsedSidecarManifest !== 'object') {
+          throw new Error('Malformed manifest JSON');
+        }
+      } catch (err) {
+        return failUpdate(502, `Invalid manifest in downloaded update: ${err.message}`);
+      }
+
+      const serverBuf = fileBuffers.get('sidecars/agy-cockpit/server.cjs');
+      const uiBuf = fileBuffers.get('sidecars/agy-cockpit/ui.html');
+      if (!serverBuf || serverBuf.length < 1000 || !uiBuf || uiBuf.length < 1000) {
+        return failUpdate(502, 'Downloaded sidecar files are unexpectedly truncated');
+      }
+
+      parsedSidecarManifest.command = process.execPath.replace(/\\/g, '/');
+      try {
+        writeFileAtomic(path.join(pluginDir, 'plugin.json'), fileBuffers.get('plugin.json'));
+        writeFileAtomic(path.join(pluginDir, 'README.md'), fileBuffers.get('README.md'));
+        writeJsonAtomic(path.join(sidecarDir, 'sidecar.json'), parsedSidecarManifest, undefined, true);
+        writeFileAtomic(path.join(sidecarDir, 'server.cjs'), serverBuf);
+        writeFileAtomic(path.join(sidecarDir, 'ui.html'), uiBuf);
+        writeJsonAtomic(metaPath, { installedCommit: targetCommit, repoRoot, installedAtMs: Date.now() }, undefined, true);
+      } catch (writeErr) {
+        return failUpdate(500, `Failed to write updated plugin files: ${writeErr.message}`);
+      }
+
+      this.cachedInstallMeta = { pluginDir, metaPath, installedCommit: targetCommit, repoRoot };
+      this.pluginUpdateState = { updateAvailable: false, installedCommit: targetCommit, remoteCommit: targetCommit, checkedAtMs: Date.now(), localDirty: false, isAhead: false, error: '' };
+      this.lastPluginUpdateSig = `false|${targetCommit}|${targetCommit}|false|false`;
+      this.pluginUpdateRev += 1;
+      this.cachedCardsState = null;
+
+      const pluginUpdate = this.getPluginUpdatePayload();
+      return { status: 200, body: { ok: true, updated: true, ...pluginUpdate, pluginUpdate } };
+    })();
+
+    this.pluginUpdateApplyPromise = runPromise;
+    try {
+      return await runPromise;
+    } finally {
+      this.pluginUpdateApplyPromise = null;
+    }
+  }
+
   getDiagnosticsStatusPayload(query = {}) {
     const sim = typeof query.simulateDiag === 'string' ? query.simulateDiag.trim().toLowerCase() : '';
     if (sim === 'fail' || sim === 'warn') {
@@ -5782,6 +6026,12 @@ class AgyCockpitServer {
 
     this.gitCache.checkKnownRepos(isForce);
     this.checkAgyBinaryChanged(isForce);
+    if (
+      this.pluginUpdateState.checkedAtMs > 0 &&
+      Date.now() - this.pluginUpdateState.checkedAtMs >= PLUGIN_UPDATE_CHECK_INTERVAL_MS
+    ) {
+      void this.checkPluginUpdate(false);
+    }
 
     const checkNowMs = Date.now();
     if (this.cachedCardsState && Array.isArray(this.cachedCardsState.cards)) {
@@ -5813,6 +6063,7 @@ class AgyCockpitServer {
       this.cachedCardsState.gitRev === this.gitCache.revision &&
       this.cachedCardsState.modelsCatalogRev === this.modelsCatalogRev &&
       this.cachedCardsState.diagnosticsRev === this.diagnosticsRev &&
+      this.cachedCardsState.pluginUpdateRev === this.pluginUpdateRev &&
       this.cachedCardsState.activeWorkspaceKey === activeWorkspaceKey
     ) {
       visibleEntries = this.cachedCardsState.visibleEntries;
@@ -5939,6 +6190,7 @@ class AgyCockpitServer {
         projectsRev: this.projectsRev,
         modelsCatalogRev: this.modelsCatalogRev,
         diagnosticsRev: this.diagnosticsRev,
+        pluginUpdateRev: this.pluginUpdateRev,
         activeWorkspaceKey,
         archivedIds: archivedProjects.map((p) => [p.id, p.count]),
         archivedConvIds: archivedConversations.map((c) => [c.id, c.title, c.lastActiveMs]),
@@ -5988,6 +6240,7 @@ class AgyCockpitServer {
         gitRev: this.gitCache.revision,
         modelsCatalogRev: this.modelsCatalogRev,
         diagnosticsRev: this.diagnosticsRev,
+        pluginUpdateRev: this.pluginUpdateRev,
         activeWorkspaceKey,
         visibleEntries,
         cards,
@@ -6150,6 +6403,7 @@ class AgyCockpitServer {
       defaultModelEnum: this.cachedModelsCatalog.defaultModelEnum || '',
       quota: this.cachedQuota,
       diagnostics: this.getDiagnosticsStatusPayload(query),
+      pluginUpdate: this.getPluginUpdatePayload(),
       workspaces,
       archivedProjects,
       archivedConversations,
@@ -6332,6 +6586,10 @@ class AgyCockpitServer {
     const query = Object.fromEntries(urlObj.searchParams.entries());
 
     if (req.method === 'GET' && pathname === '/api/status') {
+      if (this.restartingForUpdate) {
+        sendJson(res, 503, { error: 'restarting' });
+        return;
+      }
       if (!this.trajectoriesInitialSyncDone) {
         await this.syncTrajectoriesFromLanguageServer(false);
       }
@@ -6352,6 +6610,17 @@ class AgyCockpitServer {
         simulate: query.simulate || ''
       });
       sendJson(res, 200, report);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/plugin-update') {
+      const { status, body } = await this.applyPluginUpdate();
+      sendJson(res, status, body);
+      if (body?.updated && this.bootScriptMtimeMs > 0) {
+        this.restartingForUpdate = true;
+        this.bootScriptMtimeMs = 0;
+        setTimeout(() => this.stop().finally(() => process.exit(0)), 100).unref?.();
+      }
       return;
     }
 
@@ -6879,12 +7148,19 @@ class AgyCockpitServer {
         if (typeof diagTimer.unref === 'function') {
           diagTimer.unref();
         }
+        setTimeout(() => void this.checkPluginUpdate(false), 2500).unref?.();
+        this.pluginUpdateTimer = setInterval(() => void this.checkPluginUpdate(false), PLUGIN_UPDATE_CHECK_INTERVAL_MS);
+        this.pluginUpdateTimer.unref?.();
         resolve(srv);
       });
     });
   }
 
   async stop() {
+    if (this.pluginUpdateTimer) {
+      clearInterval(this.pluginUpdateTimer);
+      this.pluginUpdateTimer = null;
+    }
     if (this.saveCacheTimer || this.indexCacheDirty) {
       this.saveIndexCache();
     }
