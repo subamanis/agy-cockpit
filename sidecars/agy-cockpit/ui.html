@@ -5492,14 +5492,26 @@
           if (res.ok && data && data.updated) {
             reloading = true;
             showToast('Updated to ' + (data.installedShort || 'latest') + ', reloading...');
+            if (!data.serverRestarting) {
+              window.location.reload();
+              return;
+            }
+            let ready = false;
             for (let attempt = 0; attempt < 20; attempt++) {
-              await new Promise((r) => setTimeout(r, 250));
+              await new Promise((r) => setTimeout(r, 200));
               try {
-                const probe = await apiFetch('/api/status');
-                if (probe.ok) break;
+                const probe = await apiFetch('/api/status', { signal: AbortSignal.timeout(800) });
+                if (probe.ok) {
+                  ready = true;
+                  break;
+                }
               } catch {}
             }
-            window.location.reload();
+            if (ready) {
+              window.location.reload();
+              return;
+            }
+            reloading = false;
             return;
           }
           await fetchStatus(true);

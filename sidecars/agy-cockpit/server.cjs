@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const BIND_HOST = '127.0.0.1';
@@ -5063,16 +5063,31 @@ class AgyCockpitServer {
         return failUpdate(502, 'Downloaded sidecar files are unexpectedly truncated');
       }
 
+      const destServerPath = path.join(sidecarDir, 'server.cjs');
+      let serverChanged = true;
+      if (isFile(destServerPath)) {
+        try {
+          serverChanged = !fs.readFileSync(destServerPath).equals(serverBuf);
+        } catch {}
+      }
+
       parsedSidecarManifest.command = process.execPath.replace(/\\/g, '/');
       try {
         writeFileAtomic(path.join(pluginDir, 'plugin.json'), fileBuffers.get('plugin.json'));
         writeFileAtomic(path.join(pluginDir, 'README.md'), fileBuffers.get('README.md'));
         writeJsonAtomic(path.join(sidecarDir, 'sidecar.json'), parsedSidecarManifest, undefined, true);
-        writeFileAtomic(path.join(sidecarDir, 'server.cjs'), serverBuf);
+        writeFileAtomic(destServerPath, serverBuf);
         writeFileAtomic(path.join(sidecarDir, 'ui.html'), uiBuf);
         writeJsonAtomic(metaPath, { installedCommit: targetCommit, repoRoot, installedAtMs: Date.now() }, undefined, true);
       } catch (writeErr) {
         return failUpdate(500, `Failed to write updated plugin files: ${writeErr.message}`);
+      }
+
+      if (!serverChanged && this.bootScriptMtimeMs > 0) {
+        try {
+          this.bootScriptMtimeMs = fs.statSync(__filename, { throwIfNoEntry: false })?.mtimeMs || this.bootScriptMtimeMs;
+          this.cachedUiMtimeMs = Math.floor(fs.statSync(this.uiHtmlPath, { throwIfNoEntry: false })?.mtimeMs || 0);
+        } catch {}
       }
 
       this.cachedInstallMeta = { pluginDir, metaPath, installedCommit: targetCommit, repoRoot };
@@ -5082,7 +5097,8 @@ class AgyCockpitServer {
       this.cachedCardsState = null;
 
       const pluginUpdate = this.getPluginUpdatePayload();
-      return { status: 200, body: { ok: true, updated: true, ...pluginUpdate, pluginUpdate } };
+      const serverRestarting = Boolean(serverChanged && this.bootScriptMtimeMs > 0);
+      return { status: 200, body: { ok: true, updated: true, serverRestarting, ...pluginUpdate, pluginUpdate } };
     })();
 
     this.pluginUpdateApplyPromise = runPromise;
@@ -6596,10 +6612,7 @@ class AgyCockpitServer {
       const payload = this.handleStatusRequest(query);
       sendJson(res, 200, payload);
       if (this.scriptChangedOnDisk && this.bootScriptMtimeMs > 0) {
-        this.bootScriptMtimeMs = 0;
-        setImmediate(() => {
-          this.stop().finally(() => process.exit(0));
-        });
+        this.restartProcess();
       }
       return;
     }
@@ -6616,10 +6629,8 @@ class AgyCockpitServer {
     if (req.method === 'POST' && pathname === '/api/plugin-update') {
       const { status, body } = await this.applyPluginUpdate();
       sendJson(res, status, body);
-      if (body?.updated && this.bootScriptMtimeMs > 0) {
-        this.restartingForUpdate = true;
-        this.bootScriptMtimeMs = 0;
-        setTimeout(() => this.stop().finally(() => process.exit(0)), 100).unref?.();
+      if (body?.updated && body?.serverRestarting) {
+        this.restartProcess();
       }
       return;
     }
@@ -7154,6 +7165,20 @@ class AgyCockpitServer {
         resolve(srv);
       });
     });
+  }
+
+  restartProcess() {
+    if (this.restartingForUpdate || this.bootScriptMtimeMs <= 0) return;
+    this.restartingForUpdate = true;
+    this.bootScriptMtimeMs = 0;
+    setTimeout(() => {
+      this.stop().finally(() => {
+        try {
+          spawn(process.execPath, [__filename], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env }).unref();
+        } catch {}
+        process.exit(0);
+      });
+    }, 80).unref?.();
   }
 
   async stop() {
