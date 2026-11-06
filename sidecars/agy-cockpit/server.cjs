@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFile, spawn } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const BIND_HOST = '127.0.0.1';
@@ -7172,12 +7172,7 @@ class AgyCockpitServer {
     this.restartingForUpdate = true;
     this.bootScriptMtimeMs = 0;
     setTimeout(() => {
-      this.stop().finally(() => {
-        try {
-          spawn(process.execPath, [__filename], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env }).unref();
-        } catch {}
-        process.exit(0);
-      });
+      this.stop().finally(() => process.exit(0));
     }, 80).unref?.();
   }
 
