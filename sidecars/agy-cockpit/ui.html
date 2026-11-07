@@ -798,6 +798,14 @@
       gap: 7px;
     }
 
+    .search-input-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+    }
+
     .search-input {
       flex: 1;
       min-width: 0;
@@ -812,12 +820,46 @@
       transition: border-color 0.12s;
     }
 
+    .search-input-wrap.has-value .search-input {
+      padding-right: 28px;
+    }
+
     .search-input::placeholder {
       color: var(--muted-foreground, #777777);
     }
 
     .search-input:focus {
       border-color: var(--muted-foreground, #888888);
+    }
+
+    .search-clear-btn {
+      position: absolute;
+      right: 5px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 20px;
+      height: 20px;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted-foreground, #888888);
+      font-size: 15px;
+      line-height: 1;
+      padding: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: color 0.12s, background 0.12s;
+    }
+
+    .search-input-wrap.has-value .search-clear-btn {
+      display: inline-flex;
+    }
+
+    .search-clear-btn:hover {
+      color: var(--foreground, #ededed);
+      background: var(--secondary, rgba(255, 255, 255, 0.08));
     }
 
     .btn-new-chat {
@@ -1449,6 +1491,10 @@
       color: var(--foreground, #ededed);
     }
 
+    .search-hits strong.hit-badge-ai {
+      color: #c084fc;
+    }
+
     .search-mark {
       background: rgba(250, 204, 21, 0.24);
       color: #fef08a;
@@ -1793,12 +1839,22 @@
       <div class="section-body">
         <div class="filter-card">
           <div class="filter-top-row">
-            <input
-              type="text"
-              id="search-input"
-              class="search-input"
-              placeholder="Filter conversations or prompts..."
-            />
+            <div class="search-input-wrap" id="search-input-wrap">
+              <input
+                type="text"
+                id="search-input"
+                class="search-input"
+                placeholder="Filter conversations or prompts..."
+              />
+              <button
+                type="button"
+                class="search-clear-btn"
+                id="search-clear-btn"
+                data-action="clear-search"
+                title="Clear filter"
+                aria-label="Clear filter"
+              >×</button>
+            </div>
             <button class="btn-new-chat" id="btn-toggle-new-chat" data-action="toggle-new-chat" title="Start a new conversation">+ New</button>
           </div>
           <div id="new-chat-slot" class="card-slot"></div>
@@ -1914,6 +1970,7 @@
       const workspacePillsEl = document.getElementById('workspace-pills');
       const newChatSlotEl = document.getElementById('new-chat-slot');
       const btnToggleNewChatEl = document.getElementById('btn-toggle-new-chat');
+      const searchInputWrapEl = document.getElementById('search-input-wrap');
       const searchInput = document.getElementById('search-input');
       const activeWsIndicator = document.getElementById('active-workspace-indicator');
       const listHeaderTitle = document.getElementById('list-header-title');
@@ -3283,7 +3340,8 @@
           searchHitsHtml = '<div class="search-hits">';
           for (const mp of searchHit.matchingPrompts) {
             const hitLabel = mp.label || ('#' + mp.index);
-            searchHitsHtml += '<div><strong>' + escapeHtml(hitLabel) + ':</strong> ' + highlightSearchText(mp.text, activeSearchQ) + '</div>';
+            const badgeClass = mp.isAssistant ? ' class="hit-badge-ai"' : '';
+            searchHitsHtml += '<div><strong' + badgeClass + '>' + escapeHtml(hitLabel) + ':</strong> ' + highlightSearchText(mp.text, activeSearchQ) + '</div>';
           }
           searchHitsHtml += '</div>';
         }
@@ -3849,6 +3907,11 @@
           if (aPin && bPin) {
             const pinDiff = (Number(b.pinnedAtMs) || 0) - (Number(a.pinnedAtMs) || 0);
             if (pinDiff !== 0) return pinDiff;
+          }
+          if (q) {
+            const aUser = Boolean(state.searchMatches && state.searchMatches[a.id] && state.searchMatches[a.id].hasUserMatch);
+            const bUser = Boolean(state.searchMatches && state.searchMatches[b.id] && state.searchMatches[b.id].hasUserMatch);
+            if (aUser !== bUser) return aUser ? -1 : 1;
           }
           return (Number(b.lastActiveMs) || 0) - (Number(a.lastActiveMs) || 0);
         });
@@ -5277,6 +5340,12 @@
           handleStartQuickNewChat();
           return;
         }
+        if (action === 'clear-search') {
+          clearSearchState();
+          renderAll();
+          if (searchInput) searchInput.focus();
+          return;
+        }
 
         if (action === 'toggle-section') {
           const sec = actionBtn.getAttribute('data-section');
@@ -5469,6 +5538,14 @@
           closeModal();
           return;
         }
+        if (e.target && e.target.id === 'search-input') {
+          if (e.key === 'Escape' && (searchInput.value || state.searchQuery)) {
+            e.preventDefault();
+            clearSearchState();
+            renderAll();
+          }
+          return;
+        }
         if (e.target && e.target.id === 'rename-conv-input') {
           if (e.key === 'Enter') {
             e.preventDefault();
@@ -5519,6 +5596,7 @@
       let searchTimer = null;
       searchInput.addEventListener('input', () => {
         state.searchQuery = searchInput.value;
+        syncSearchClearButton();
         clearTimeout(searchTimer);
         if (!state.searchQuery.trim()) {
           state.lastFetchedQuery = '';
@@ -5631,6 +5709,12 @@
         return Boolean(document.hidden || isIframeCollapsed());
       }
 
+      function syncSearchClearButton() {
+        if (!searchInputWrapEl) return;
+        const hasVal = Boolean((searchInput && searchInput.value) || state.searchQuery);
+        searchInputWrapEl.classList.toggle('has-value', hasVal);
+      }
+
       function clearSearchState() {
         clearTimeout(searchTimer);
         const hadSearch = Boolean(state.searchQuery || (searchInput && searchInput.value) || state.searchMatches);
@@ -5640,6 +5724,7 @@
         if (searchInput && searchInput.value) {
           searchInput.value = '';
         }
+        syncSearchClearButton();
         return hadSearch;
       }
 

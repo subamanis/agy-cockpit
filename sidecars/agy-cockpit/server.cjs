@@ -362,6 +362,23 @@ function cleanModelPreview(rawContent) {
   return text.slice(0, 300);
 }
 
+function cleanAssistantSearchText(rawContent) {
+  if (!rawContent || typeof rawContent !== 'string') return '';
+  let text = rawContent
+    .replace(/<HANDOFF_PROMPT>[\s\S]*?<\/HANDOFF_PROMPT>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/```[A-Za-z0-9_-]*\n?([\s\S]*?)```/g, ' $1 ')
+    .replace(/`([^`]+)`/g, ' $1 ')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/<\/?[A-Za-z_][A-Za-z0-9_-]*[^>]*>/g, ' ')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^\s*[-*>]+\s+/gm, '')
+    .replace(/[*_~]+/g, '');
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.slice(0, 1500);
+}
+
 function normalizeSearchText(str) {
   if (!str || typeof str !== 'string') return '';
   return str
@@ -1069,6 +1086,7 @@ function createEmptyEntry(convId) {
     modelLabel: '',
     modelResolvedMtimeMs: 0,
     prompts: [],
+    assistantReplies: [],
     mentionedCommits: []
   };
   Object.defineProperty(entry, 'searchCorpusLower', {
@@ -1468,6 +1486,26 @@ function processTranscriptLine(entry, line, isFirstLine) {
       if (respTs > 0) {
         entry.lastModelResponseMs = Math.max(entry.lastModelResponseMs || 0, respTs);
       }
+      const assistantText = cleanAssistantSearchText(content);
+      if (assistantText) {
+        if (!Array.isArray(entry.assistantReplies)) {
+          entry.assistantReplies = [];
+        }
+        const existingIdx = entry.assistantReplies.findIndex((r) => r.stepIndex === stepIdx && stepIdx >= 0);
+        if (existingIdx >= 0) {
+          entry.assistantReplies[existingIdx].text = assistantText;
+          if (createdAt) entry.assistantReplies[existingIdx].createdAt = createdAt;
+        } else {
+          entry.assistantReplies.push({
+            stepIndex: stepIdx >= 0 ? stepIdx : entry.assistantReplies.length,
+            createdAt,
+            text: assistantText
+          });
+          if (entry.assistantReplies.length > 20) {
+            entry.assistantReplies.shift();
+          }
+        }
+      }
     }
 
     entry.pendingSubagentRoles = [];
@@ -1649,6 +1687,14 @@ function rebuildSearchCorpus(entry) {
   if (entry.firstPrompt) parts.push(normalizeSearchText(entry.firstPrompt));
   if (entry.lastPrompt) parts.push(normalizeSearchText(entry.lastPrompt));
   if (entry.checkpointOverview) parts.push(normalizeSearchText(entry.checkpointOverview));
+  if (entry.lastModelResponse) {
+    parts.push(normalizeSearchText(entry.lastModelResponse));
+  }
+  if (Array.isArray(entry.assistantReplies)) {
+    for (const r of entry.assistantReplies) {
+      if (r && r.text) parts.push(normalizeSearchText(r.text));
+    }
+  }
   for (const p of entry.prompts) {
     parts.push(normalizeSearchText(p.text));
   }
@@ -6362,9 +6408,15 @@ class AgyCockpitServer {
         const customTitleHit = Boolean(customTitleNorm && customTitleNorm.includes(rawSearch));
         if (!corpusHit && !customTitleHit) continue;
         const matchingPrompts = [];
+        let hasUserMatch = Boolean(customTitleHit);
+        if (entry.title && normalizeSearchText(entry.title).includes(rawSearch)) {
+          hasUserMatch = true;
+        }
         for (const p of entry.prompts) {
           if (normalizeSearchText(p.text).includes(rawSearch)) {
-            matchingPrompts.push({
+            hasUserMatch = true;
+            matchingPrompts
+.push({
               index: p.index,
               label: '#' + p.index,
               createdAt: p.createdAt,
@@ -6375,22 +6427,27 @@ class AgyCockpitServer {
         }
         if (matchingPrompts.length === 0) {
           if (entry.checkpointOverview && normalizeSearchText(entry.checkpointOverview).includes(rawSearch)) {
-            matchingPrompts.push({
+            matchingPrompts
+.push({
               index: 0,
               label: 'Summary',
               createdAt: '',
               text: buildCenteredSearchSnippet(entry.checkpointOverview, rawSearch, 160)
             });
           } else if (entry.firstPrompt && normalizeSearchText(entry.firstPrompt).includes(rawSearch)) {
-            matchingPrompts.push({
+            hasUserMatch = true;
+            matchingPrompts
+.push({
               index: 1,
               label: '#1',
               createdAt: '',
               text: buildCenteredSearchSnippet(entry.firstPrompt, rawSearch, 160)
             });
           } else if (entry.lastPrompt && normalizeSearchText(entry.lastPrompt).includes(rawSearch)) {
+            hasUserMatch = true;
             const fallbackIdx = entry.promptCount || 1;
-            matchingPrompts.push({
+            matchingPrompts
+.push({
               index: fallbackIdx,
               label: '#' + fallbackIdx,
               createdAt: '',
@@ -6402,7 +6459,8 @@ class AgyCockpitServer {
             !customTitleHit &&
             normalizeSearchText(entry.title).includes(rawSearch)
           ) {
-            matchingPrompts.push({
+            matchingPrompts
+.push({
               index: 0,
               label: 'Default title',
               createdAt: '',
@@ -6410,8 +6468,37 @@ class AgyCockpitServer {
             });
           }
         }
+        if (matchingPrompts.length === 0) {
+          if (Array.isArray(entry.assistantReplies) && entry.assistantReplies.length > 0) {
+            for (let i = entry.assistantReplies.length - 1; i >= 0; i--) {
+              const r = entry.assistantReplies[i];
+              if (r && r.text && normalizeSearchText(r.text).includes(rawSearch)) {
+                matchingPrompts
+.push({
+                  index: -1,
+                  label: 'AI Reply',
+                  createdAt: r.createdAt || '',
+                  text: buildCenteredSearchSnippet(r.text, rawSearch, 160),
+                  isAssistant: true
+                });
+                if (matchingPrompts.length >= 2) break;
+              }
+            }
+          }
+          if (matchingPrompts.length === 0 && entry.lastModelResponse && normalizeSearchText(entry.lastModelResponse).includes(rawSearch)) {
+            matchingPrompts
+.push({
+              index: -1,
+              label: 'AI Reply',
+              createdAt: '',
+              text: buildCenteredSearchSnippet(entry.lastModelResponse, rawSearch, 160),
+              isAssistant: true
+            });
+          }
+        }
         searchMatches[entry.id] = {
-          matchingPrompts
+          matchingPrompts,
+          hasUserMatch: Boolean(hasUserMatch)
         };
       }
     }
