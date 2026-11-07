@@ -1457,6 +1457,11 @@
       font-weight: 600;
     }
 
+    .empty-box.no-results {
+      color: #f87171;
+      border-color: rgba(248, 113, 113, 0.25);
+    }
+
     .empty-box {
       padding: 16px 12px;
       text-align: center;
@@ -3804,7 +3809,8 @@
         refreshQuotaModal();
         refreshContextBreakdownModalOnPoll();
 
-        const q = (state.lastFetchedQuery || '').trim().toLowerCase();
+        const rawQuery = (state.lastFetchedQuery || '').trim();
+        const q = rawQuery.toLowerCase();
         const filtered = state.conversations.filter((c) => {
           if (c.isSubagent) return false;
           if (c.id === pinnedId) return false;
@@ -3851,7 +3857,9 @@
                 ? 'No other conversations in this workspace. Select "All" to browse other projects.'
                 : 'No conversations in this project yet. Click "+ New" to start one.')
             : 'No other conversations match the current filter.';
-          const emptyHtml = '<div class="empty-box">' + emptyMsg + '</div>';
+          const emptyHtml = rawQuery
+            ? '<div class="empty-box no-results">No results for \'' + escapeHtml(rawQuery) + '\'</div>'
+            : '<div class="empty-box">' + emptyMsg + '</div>';
           if (cardsContainer.innerHTML !== emptyHtml) {
             cardsContainer.innerHTML = emptyHtml;
           }
