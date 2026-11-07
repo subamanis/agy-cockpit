@@ -364,7 +364,12 @@ function cleanModelPreview(rawContent) {
 
 function normalizeSearchText(str) {
   if (!str || typeof str !== 'string') return '';
-  return str.replace(/\s+/g, ' ').trim().toLowerCase();
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function buildCenteredSearchSnippet(rawText, rawQuery, maxChars = 160) {
@@ -375,7 +380,11 @@ function buildCenteredSearchSnippet(rawText, rawQuery, maxChars = 160) {
   const effectiveMax = Math.max(maxChars, qLower.length + 24);
   if (!qLower || norm.length <= effectiveMax) return norm;
   const lower = norm.toLowerCase();
-  const idx = lower.indexOf(qLower);
+  let idx = lower.indexOf(qLower);
+  if (idx < 0) {
+    const normClean = normalizeSearchText(norm);
+    idx = normClean.indexOf(qLower);
+  }
   if (idx < 0) return norm.slice(0, maxChars).trimEnd() + '…';
 
   const matchEnd = idx + qLower.length;

@@ -1457,11 +1457,6 @@
       font-weight: 600;
     }
 
-    .empty-box.no-results {
-      color: #f87171;
-      border-color: rgba(248, 113, 113, 0.25);
-    }
-
     .empty-box {
       padding: 16px 12px;
       text-align: center;
@@ -1471,6 +1466,11 @@
       background: var(--card, #141414);
       border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
       border-radius: 8px;
+    }
+
+    .empty-box.no-results {
+      color: #f87171;
+      border-color: rgba(248, 113, 113, 0.25);
     }
 
     .toast {
@@ -1892,6 +1892,7 @@
         pendingSmartHandoff: null,
         handoffStateByConv: new Map(),
         openMenuConvId: null,
+        openMenuInPinned: false,
         newChatOpen: false,
         newChatText: '',
         newChatGeneral: false,
@@ -1949,8 +1950,20 @@
         const str = String(rawText ?? '');
         const q = String(rawQuery ?? '').replace(/\s+/g, ' ').trim();
         if (!q || !str) return escapeHtml(str);
-        const pattern = q
-          .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const accentMap = {
+          'a': '[aáàâäãå]', 'α': '[αά]',
+          'e': '[eéèêë]',   'ε': '[εέ]',
+          'i': '[iíìîï]',   'ι': '[ιίϊΐ]',
+          'o': '[oóòôöõ]',  'ο': '[οό]',
+          'u': '[uúùûü]',   'υ': '[υύϋΰ]',
+          'y': '[yýÿ]',
+          'η': '[ηή]',
+          'ω': '[ωώ]'
+        };
+        const baseQ = q.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const pattern = baseQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+          .replace(/[a-zα-ω]/gi, (ch) => accentMap[ch.toLowerCase()] || ch)
           .replace(/ /g, '\\s+');
         const re = new RegExp(pattern, 'gi');
         let pos = 0;
@@ -3159,13 +3172,13 @@
               '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
                 (isDetailsOpen ? 'Hide History' : 'History &amp; Commits') +
               '</button>' +
-              renderCardGearMenu(card) +
+              renderCardGearMenu(card, true) +
             '</div>' +
           '</div>'
         );
       }
 
-      function renderCardGearMenu(card, isOtherChat) {
+      function renderCardGearMenu(card, inPinnedCard) {
         const idEsc = escapeHtml(card.id);
         const displayTitle = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
         const defaultTitle = card.defaultTitle || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
@@ -3173,8 +3186,11 @@
         const defaultTitleEsc = escapeHtml(defaultTitle);
         const isPinned = Boolean(card.pinned);
         const isUnread = Boolean(card.unread);
+        const isOtherChat = !inPinnedCard && card.id !== state.lastPinnedId;
         const canToggleUnread = Boolean(isOtherChat && !card.isThinking && !card.waitState);
-        const isMenuOpen = state.openMenuConvId === card.id;
+        const isMenuOpen =
+          state.openMenuConvId === card.id &&
+          Boolean(state.openMenuInPinned) === Boolean(inPinnedCard);
         return (
           '<div class="card-menu-wrap">' +
             '<button class="ghost-btn gear-btn" data-action="toggle-card-menu" data-id="' + idEsc + '" title="Conversation actions" aria-label="Conversation actions">⚙</button>' +
@@ -3203,6 +3219,7 @@
         const tier = getCardTier(card);
         const titleText = card.customTitle || card.title || card.firstPrompt || card.lastPrompt || ('Conversation ' + card.id.slice(0, 8));
         const pinIconHtml = card.pinned ? PIN_ICON_SVG : '';
+        const showRowUnread = Boolean(card.id !== state.lastPinnedId && card.unread);
         const userMsgText = (card.lastPrompt || card.firstPrompt || '').trim();
         const aiMsgText = (card.lastModelResponse || '').trim();
 
@@ -3236,7 +3253,7 @@
               '</div>';
           } else if (aiMsgText) {
             previewsHtml +=
-              '<div class="conv-msg-line conv-msg-ai' + (card.unread ? ' unread' : '') + '" title="' + escapeHtml(aiMsgText) + '">' +
+              '<div class="conv-msg-line conv-msg-ai' + (showRowUnread ? ' unread' : '') + '" title="' + escapeHtml(aiMsgText) + '">' +
                 '<span class="conv-msg-role">AI:</span>' +
                 '<span class="conv-msg-text">' + escapeHtml(aiMsgText) + '</span>' +
               '</div>';
@@ -3281,7 +3298,7 @@
         return (
           '<div class="conv-row-top" data-action="open-chat" data-id="' + escapeHtml(card.id) + '">' +
             '<div class="conv-title-wrap">' +
-              renderStatusBadge(card, true) +
+              renderStatusBadge(card, showRowUnread) +
               pinIconHtml +
               '<span class="conv-title">' + highlightSearchText(titleText, activeSearchQ) + '</span>' +
             '</div>' +
@@ -3308,7 +3325,7 @@
               '<button class="ghost-btn" data-action="toggle-details" data-id="' + escapeHtml(card.id) + '">' +
                 (isDetailsOpen ? 'Hide' : 'History') +
               '</button>' +
-              renderCardGearMenu(card, true) +
+              renderCardGearMenu(card, false) +
             '</div>' +
           '</div>' +
           searchHitsHtml
@@ -3337,7 +3354,7 @@
       function syncCardDom(cardEl, card, headerHtml) {
         if (cardEl.classList.contains('conv-row')) {
           cardEl.classList.toggle('is-waiting', Boolean(card.waitState));
-          cardEl.classList.toggle('is-unread', Boolean(!card.waitState && card.unread));
+          cardEl.classList.toggle('is-unread', Boolean(!card.waitState && card.id !== state.lastPinnedId && card.unread));
         }
         const headerSlot = cardEl.querySelector('.card-header-slot');
         if (headerSlot && headerSlot.innerHTML !== headerHtml) {
@@ -3729,6 +3746,8 @@
         const pinnedId = pinnedCard ? pinnedCard.id : '';
         if (state.lastPinnedId && pinnedId && state.lastPinnedId !== pinnedId) {
           state.selectedWorkspaceKey = '__auto__';
+          state.openMenuConvId = null;
+          state.openMenuInPinned = false;
           clearSearchState();
           const isOldPending = Boolean(
             state.pendingSmartHandoff && state.pendingSmartHandoff.convId === state.lastPinnedId
@@ -3813,7 +3832,7 @@
         const q = rawQuery.toLowerCase();
         const filtered = state.conversations.filter((c) => {
           if (c.isSubagent) return false;
-          if (c.id === pinnedId) return false;
+          if (!q && c.id === pinnedId) return false;
           if (effectiveScope !== '__all__') {
             const cKey = c.workspaceKey || '__unscoped__';
             if (cKey !== effectiveScope) return false;
@@ -3835,9 +3854,13 @@
         });
 
         const wsObj = state.workspaces.find((w) => w.key === effectiveScope);
-        const scopeTitle = effectiveScope === '__all__'
-          ? 'Other conversations (All)'
-          : 'Other conversations in ' + ((wsObj && wsObj.name) || 'workspace');
+        const scopeTitle = q
+          ? (effectiveScope === '__all__'
+              ? 'Matching conversations (All)'
+              : 'Matching conversations in ' + ((wsObj && wsObj.name) || 'workspace'))
+          : (effectiveScope === '__all__'
+              ? 'Other conversations (All)'
+              : 'Other conversations in ' + ((wsObj && wsObj.name) || 'workspace'));
         listHeaderTitle.textContent = scopeTitle;
         listHeaderCount.textContent = filtered.length + ' chat' + (filtered.length === 1 ? '' : 's');
 
@@ -3847,19 +3870,22 @@
 
         const showWsName = effectiveScope === '__all__';
         if (filtered.length === 0) {
-          const hasAnyInScope =
-            effectiveScope === '__all__' ||
-            mainChats.some(
-              (c) => (c.promptCount > 0 || c.lastActiveMs > 0) && (c.workspaceKey || '__unscoped__') === effectiveScope
-            );
-          const emptyMsg = effectiveScope !== '__all__'
-            ? (hasAnyInScope
-                ? 'No other conversations in this workspace. Select "All" to browse other projects.'
-                : 'No conversations in this project yet. Click "+ New" to start one.')
-            : 'No other conversations match the current filter.';
-          const emptyHtml = rawQuery
-            ? '<div class="empty-box no-results">No results for \'' + escapeHtml(rawQuery) + '\'</div>'
-            : '<div class="empty-box">' + emptyMsg + '</div>';
+          let emptyHtml;
+          if (rawQuery) {
+            emptyHtml = '<div class="empty-box no-results">No results for \'' + escapeHtml(rawQuery) + '\'</div>';
+          } else {
+            const hasAnyInScope =
+              effectiveScope === '__all__' ||
+              mainChats.some(
+                (c) => (c.promptCount > 0 || c.lastActiveMs > 0) && (c.workspaceKey || '__unscoped__') === effectiveScope
+              );
+            const emptyMsg = effectiveScope !== '__all__'
+              ? (hasAnyInScope
+                  ? 'No other conversations in this workspace. Select "All" to browse other projects.'
+                  : 'No conversations in this project yet. Click "+ New" to start one.')
+              : 'No other conversations match the current filter.';
+            emptyHtml = '<div class="empty-box">' + emptyMsg + '</div>';
+          }
           if (cardsContainer.innerHTML !== emptyHtml) {
             cardsContainer.innerHTML = emptyHtml;
           }
@@ -3893,7 +3919,7 @@
               document.activeElement.tagName === 'SELECT');
           const anyRowHasOpenMenuOrFocus =
             Boolean(activeInCards) ||
-            filtered.some((c) => state.openMenuConvId === c.id);
+            (!state.openMenuInPinned && filtered.some((c) => state.openMenuConvId === c.id));
 
           for (let i = 0; i < filtered.length; i++) {
             const c = filtered[i];
@@ -4240,7 +4266,14 @@
       }
 
       function readCurrentHandoffText(convId) {
-        const activeTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
+        const selector = 'textarea.handoff-input[data-focus-conv="' + convId + '"]';
+        const focusedTa =
+          document.activeElement &&
+          document.activeElement.matches &&
+          document.activeElement.matches(selector)
+            ? document.activeElement
+            : null;
+        const activeTa = focusedTa || document.querySelector(selector);
         const hState = getHandoffState(convId);
         if (activeTa) {
           hState.text = activeTa.value;
@@ -5146,7 +5179,13 @@
         }
         if (action === 'toggle-card-menu' && convId) {
           closeProjectContextMenu();
-          state.openMenuConvId = state.openMenuConvId === convId ? null : convId;
+          const inPinned = Boolean(actionBtn.closest('#pinned-container'));
+          if (state.openMenuConvId === convId && Boolean(state.openMenuInPinned) === inPinned) {
+            state.openMenuConvId = null;
+          } else {
+            state.openMenuConvId = convId;
+            state.openMenuInPinned = inPinned;
+          }
           renderAll();
           return;
         }
@@ -5307,12 +5346,22 @@
         } else if (action === 'toggle-clamp') {
           const el = actionBtn.previousElementSibling;
           if (el) {
-            const expanded = el.classList.toggle('expanded');
-            actionBtn.textContent = expanded ? 'Show less' : 'Show more';
             const expandKey = actionBtn.getAttribute('data-expand-key');
+            const expanded = expandKey
+              ? !state.expandedPromptKeys.has(expandKey)
+              : !el.classList.contains('expanded');
             if (expandKey) {
               if (expanded) state.expandedPromptKeys.add(expandKey);
               else state.expandedPromptKeys.delete(expandKey);
+              for (const btn of document.querySelectorAll('[data-action="toggle-clamp"][data-expand-key="' + expandKey + '"]')) {
+                btn.textContent = expanded ? 'Show less' : 'Show more';
+                if (btn.previousElementSibling) {
+                  btn.previousElementSibling.classList.toggle('expanded', expanded);
+                }
+              }
+            } else {
+              el.classList.toggle('expanded', expanded);
+              actionBtn.textContent = expanded ? 'Show less' : 'Show more';
             }
           }
         }
@@ -5382,7 +5431,13 @@
           }
           const hState = getHandoffState(convId);
           hState.text = e.target.value;
+          for (const ta of document.querySelectorAll('textarea.handoff-input[data-focus-conv="' + convId + '"]')) {
+            if (ta !== e.target && ta.value !== e.target.value) {
+              ta.value = e.target.value;
+            }
+          }
           if (hState.step === 'ready' && e.target.value.trim() === '') {
+            const inCards = Boolean(e.target.closest && e.target.closest('#cards-container'));
             const card = state.conversations.find((c) => c.id === convId);
             hState.step = 'focus';
             hState.text = '';
@@ -5393,7 +5448,9 @@
             );
             state.scrollPositions.set(convId + ':handoff', 0);
             renderAll();
-            const nextTa = document.querySelector('textarea.handoff-input[data-focus-conv="' + convId + '"]');
+            const scopeRoot = inCards ? cardsContainer : pinnedContainer;
+            const selector = 'textarea.handoff-input[data-focus-conv="' + convId + '"]';
+            const nextTa = (scopeRoot && scopeRoot.querySelector(selector)) || document.querySelector(selector);
             if (nextTa) {
               nextTa.focus();
             }
